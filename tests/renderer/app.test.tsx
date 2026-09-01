@@ -15,6 +15,7 @@ const importTemplate = vi.fn();
 const listProviders = vi.fn();
 const generateReport = vi.fn();
 const exportReport = vi.fn();
+const restoreBackup = vi.fn();
 let navigationListener: ((page: 'today') => void) | undefined;
 
 function api(): DsrApi {
@@ -61,7 +62,7 @@ function api(): DsrApi {
     backup: {
       status: vi.fn().mockResolvedValue({}),
       create: vi.fn(),
-      restore: vi.fn()
+      restore: restoreBackup
     }
   };
 }
@@ -76,6 +77,7 @@ beforeEach(() => {
   listProviders.mockReset().mockResolvedValue([]);
   generateReport.mockReset();
   exportReport.mockReset();
+  restoreBackup.mockReset().mockResolvedValue(undefined);
   navigationListener = undefined;
   Object.defineProperty(window, 'dsr', { value: api(), configurable: true });
 });
@@ -92,6 +94,24 @@ describe('Workspace security', () => {
 
     await waitFor(() => expect(unlock).toHaveBeenCalledWith('a secure local passphrase'));
     await waitFor(() => expect(listEntries).toHaveBeenCalled());
+  });
+
+  it('offers portable-backup restore when the existing encrypted database cannot open', async () => {
+    securityStatus.mockResolvedValue({
+      locked: true,
+      requiresPassphrase: false,
+      recoveryError: 'file is not a database'
+    });
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.type(await screen.findByLabelText('Backup password'), 'correct horse battery staple');
+    await user.click(screen.getByRole('button', { name: 'Choose backup and restore' }));
+
+    expect(restoreBackup).toHaveBeenCalledWith({
+      password: 'correct horse battery staple',
+      databasePassphrase: ''
+    });
   });
 });
 

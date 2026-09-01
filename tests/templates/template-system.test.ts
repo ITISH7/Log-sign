@@ -9,7 +9,7 @@ import { openEncryptedDatabase } from '../../src/main/storage/database';
 import { parseTemplateSample } from '../../src/main/templates/sample-parser';
 import { TemplateCompiler } from '../../src/main/templates/template-compiler';
 import type { TextProviderTransport } from '../../src/main/providers/structured-text-provider';
-import type { TemplateBlueprint } from '../../src/shared/contracts';
+import { templateBlueprintSchema, type TemplateBlueprint } from '../../src/shared/contracts';
 
 const cleanupPaths: string[] = [];
 
@@ -117,6 +117,16 @@ describe('TemplateRepository', () => {
 });
 
 describe('TemplateCompiler', () => {
+  it('rejects mappings-only blueprints that cannot produce an exportable draft', () => {
+    expect(() => templateBlueprintSchema.parse({
+      schemaVersion: 1,
+      templateVersionId: 'invalid',
+      sections: [],
+      fieldMappings: [{ source: 'note', target: 'Task', transform: 'identity' }],
+      narrativeRules: [],
+      outputLayouts: {}
+    })).toThrow('at least one report section');
+  });
   it('builds a deterministic blueprint from headings when AI is unnecessary', async () => {
     const sample = await parseTemplateSample({
       name: 'simple.md',

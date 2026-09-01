@@ -104,6 +104,32 @@ describe('StructuredTextProvider', () => {
     expect(transport.prompts[1]).toContain('Required template blueprint');
   });
 
+  it('rejects a required table that omits its configured columns', async () => {
+    const input = request();
+    input.blueprint.sections = [
+      { id: 'log', title: 'Work log', kind: 'table', sourceFields: ['note', 'status'], required: true }
+    ];
+    input.blueprint.narrativeRules = [{ sectionId: 'log', instruction: 'Group the work log' }];
+    const baseMetadata = {
+      title: 'Daily Status Report', dateFrom: input.dateFrom, dateTo: input.dateTo,
+      generatedAt: '2026-08-31T18:00:00.000Z'
+    };
+    const invalid = JSON.stringify({
+      schemaVersion: 1, metadata: baseMetadata,
+      sections: [{ id: 'log', title: 'Work log', kind: 'table', rows: [] }], warnings: []
+    });
+    const valid = JSON.stringify({
+      schemaVersion: 1, metadata: baseMetadata,
+      sections: [{ id: 'log', title: 'Work log', kind: 'table', columns: ['note', 'status'], rows: [] }], warnings: []
+    });
+    const transport = new SequenceTransport([{ text: invalid }, { text: valid }]);
+
+    const draft = await new StructuredTextProvider(transport).generateStructured(input, new AbortController().signal);
+
+    expect(draft.sections[0]?.columns).toEqual(['note', 'status']);
+    expect(transport.prompts).toHaveLength(2);
+  });
+
   it('marks input for chunking at 75 percent of the model context', async () => {
     const provider = new StructuredTextProvider(new SequenceTransport([]));
     const smallLimit = request(80);
@@ -180,6 +206,27 @@ describe('CodexAppServerTransport', () => {
     events.emit('exit', 2);
 
     await expect(completion).rejects.toThrow('exited with code 2');
+    expect(killed).toBe(true);
+  });
+
+  it('aborts a hung initialize RPC and terminates the app server', async () => {
+    let markRequestWritten!: () => void;
+    const requestWritten = new Promise<void>((resolve) => { markRequestWritten = resolve; });
+    let killed = false;
+    const process: AppServerProcess = {
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      stdin: new Writable({ write(_chunk, _encoding, callback) { markRequestWritten(); callback(); } }),
+      kill: () => { killed = true; return true; }
+    };
+    const controller = new AbortController();
+    const completion = new CodexAppServerTransport('configured-model', async () => process)
+      .complete('Create JSON only', controller.signal);
+    await requestWritten;
+
+    controller.abort();
+
+    await expect(completion).rejects.toMatchObject({ name: 'AbortError' });
     expect(killed).toBe(true);
   });
 });

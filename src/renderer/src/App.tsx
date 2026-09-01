@@ -77,7 +77,11 @@ export function App() {
 function LoadingScreen() { return <main className="lock-screen"><div className="lock-card"><span className="brand-mark">D</span><h1>Opening your workspace…</h1></div></main>; }
 
 function RecoveryScreen({ message }: { message: string }) {
-  return <main className="lock-screen"><div className="lock-card"><span className="brand-mark">D</span><p className="eyebrow">Workspace recovery required</p><h1>The encrypted database could not be opened</h1><p role="alert">{message}</p><p>Keep the database and its .pre-restore safety copies. Restore the newest encrypted backup after correcting the OS keyring or database file problem.</p></div></main>;
+  const [backupPassword, setBackupPassword] = useState('');
+  const [databasePassphrase, setDatabasePassphrase] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  return <main className="lock-screen"><div className="lock-card"><span className="brand-mark">D</span><p className="eyebrow">Workspace recovery required</p><h1>The encrypted database could not be opened</h1><p role="alert">{message}</p><p>Restore a portable backup without opening the damaged workspace. The existing database is retained as a timestamped safety copy.</p><label className="field"><span>Backup password</span><input type="password" value={backupPassword} onChange={(event) => setBackupPassword(event.target.value)} /></label><label className="field"><span>New local database passphrase (Linux fallback only)</span><input type="password" value={databasePassphrase} onChange={(event) => setDatabasePassphrase(event.target.value)} /></label><button className="primary" disabled={busy || backupPassword.length < 12} onClick={async () => { setBusy(true); setError(''); try { await window.dsr.backup.restore({ password: backupPassword, databasePassphrase }); } catch (reason) { setError(readableError(reason)); setBusy(false); } }}>{busy ? 'Restoring…' : 'Choose backup and restore'}</button>{error && <p role="alert" className="inline-error">{error}</p>}</div></main>;
 }
 
 function BackupHealth() {
@@ -87,11 +91,11 @@ function BackupHealth() {
 }
 
 function UnlockScreen({ onUnlock }: { onUnlock(passphrase: string): Promise<void> }) {
-  const [passphrase, setPassphrase] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
+  const [passphrase, setPassphrase] = useState(''); const [backupPassword, setBackupPassword] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
   return <main className="lock-screen"><form className="lock-card" onSubmit={async (event) => { event.preventDefault(); setBusy(true); try { await onUnlock(passphrase); } catch (reason) { setError(readableError(reason)); } finally { setBusy(false); } }}>
     <span className="brand-mark">D</span><p className="eyebrow">Encrypted local workspace</p><h1>Welcome back</h1><p>Your Linux keyring is unavailable, so your passphrase is required at every launch.</p>
     <label className="field"><span>Database passphrase</span><input type="password" autoFocus value={passphrase} onChange={(event) => setPassphrase(event.target.value)} /></label>
-    {error && <p role="alert" className="inline-error">{error}</p>}<button className="primary" disabled={passphrase.length < 12 || busy}>{busy ? 'Unlocking…' : 'Unlock workspace'}</button>
+    {error && <p role="alert" className="inline-error">{error}</p>}<button className="primary" disabled={passphrase.length < 12 || busy}>{busy ? 'Unlocking…' : 'Unlock workspace'}</button><hr /><p className="helper">Forgot the old passphrase? Enter a new local passphrase above, then restore a portable backup.</p><label className="field"><span>Backup password</span><input type="password" value={backupPassword} onChange={(event) => setBackupPassword(event.target.value)} /></label><button type="button" disabled={busy || passphrase.length < 12 || backupPassword.length < 12} onClick={async () => { setBusy(true); setError(''); try { await window.dsr.backup.restore({ password: backupPassword, databasePassphrase: passphrase }); } catch (reason) { setError(readableError(reason)); setBusy(false); } }}>Choose backup and restore</button>
   </form></main>;
 }
 

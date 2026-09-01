@@ -117,7 +117,7 @@ export interface DsrApi {
   backup: {
     status(): Promise<{ lastSuccess?: string; lastError?: string }>;
     create(input?: { password?: string }): Promise<{ path: string }>;
-    restore(input?: { password?: string }): Promise<void>;
+    restore(input?: { password?: string; databasePassphrase?: string }): Promise<void>;
   };
 }
 

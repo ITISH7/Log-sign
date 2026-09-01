@@ -60,12 +60,16 @@ class TimeoutTransport implements TextProviderTransport {
   ) {}
 
   async healthCheck() {
+    const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
-        this.transport.healthCheck(),
+        this.transport.healthCheck(controller.signal),
         new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(() => reject(new Error(`Provider health check timed out after ${this.timeoutMs}ms`)), this.timeoutMs);
+          timer = setTimeout(() => {
+            controller.abort();
+            reject(new Error(`Provider health check timed out after ${this.timeoutMs}ms`));
+          }, this.timeoutMs);
         })
       ]);
     } finally {

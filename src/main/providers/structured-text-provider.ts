@@ -14,7 +14,7 @@ export interface TextCompletion {
 }
 
 export interface TextProviderTransport {
-  healthCheck(): Promise<ProviderHealth>;
+  healthCheck(signal?: AbortSignal): Promise<ProviderHealth>;
   complete(prompt: string, signal: AbortSignal): Promise<TextCompletion>;
 }
 
@@ -94,7 +94,13 @@ function parseDraft(text: string, request: GenerationRequest): ReportDraft | und
     if (parsed.data.sections.length !== request.blueprint.sections.length) return undefined;
     const matchesBlueprint = parsed.data.sections.every((section, index) => {
       const rule = request.blueprint.sections[index];
-      return rule && section.id === rule.id && section.title === rule.title && section.kind === rule.kind;
+      if (!rule || section.id !== rule.id || section.title !== rule.title || section.kind !== rule.kind) return false;
+      if (rule.kind === 'table') {
+        return Boolean(section.columns && section.rows) &&
+          (rule.sourceFields.length === 0 || JSON.stringify(section.columns) === JSON.stringify(rule.sourceFields));
+      }
+      if (rule.kind === 'paragraph') return section.text !== undefined;
+      return section.items !== undefined;
     });
     return matchesBlueprint ? parsed.data : undefined;
   } catch {

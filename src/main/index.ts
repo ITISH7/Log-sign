@@ -1,6 +1,6 @@
 import { randomBytes, scryptSync } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rename, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -313,8 +313,10 @@ function registerIpc(): void {
     }
   });
   ipcMain.handle('backup:status', () => requireSettings().get('backup-health') ?? {});
-  ipcMain.handle('backup:restore', async (_event, input?: { password?: string }) => {
-    if (!database || !databaseKey) throw new Error('The encrypted workspace is locked');
+  ipcMain.handle('backup:restore', async (
+    _event,
+    input?: { password?: string; databasePassphrase?: string }
+  ) => {
     const result = await dialog.showOpenDialog(mainWindow!, {
       title: 'Restore encrypted DSR backup',
       properties: ['openFile'],
@@ -325,23 +327,53 @@ function registerIpc(): void {
     const directory = await mkdtemp(join(app.getPath('userData'), '.dsr-backup-restore-'));
     const restored = join(directory, 'restored.db');
     const livePath = join(app.getPath('userData'), 'dsr-creator.db');
+    const wasUnlocked = Boolean(database && databaseKey);
+    let safetyPath: string | undefined;
+    let destinationKey: Buffer | undefined = databaseKey ? Buffer.from(databaseKey) : undefined;
     try {
       const material = await backups.restorePortable(source, restored, input?.password ?? '');
-      if (material.databaseKey && !material.databaseKey.equals(databaseKey)) {
-        rekeyEncryptedDatabase(restored, material.databaseKey, databaseKey);
+      if (!destinationKey) {
+        if (!material.databaseKey) throw new Error('This older backup requires its original workspace key');
+        destinationKey = requiresPassphrase
+          ? derivePassphraseKey(input?.databasePassphrase ?? '')
+          : randomBytes(32);
       }
-      const validation = openEncryptedDatabase(restored, databaseKey);
+      const targetKey = destinationKey;
+      if (!targetKey) throw new Error('A destination database key could not be provisioned');
+      const sourceKey = material.databaseKey ?? targetKey;
+      if (!sourceKey.equals(targetKey)) {
+        rekeyEncryptedDatabase(restored, sourceKey, targetKey);
+      }
+      const validation = openEncryptedDatabase(restored, targetKey);
       validation.close();
-      const safetyPath = `${livePath}.pre-restore-${Date.now()}-${randomBytes(4).toString('hex')}`;
-      closeDatabase();
-      try {
+      safetyPath = `${livePath}.pre-restore-${Date.now()}-${randomBytes(4).toString('hex')}`;
+      if (database) closeDatabase();
+      if (await fileExists(livePath)) {
         await replaceDatabaseFile(livePath, restored, safetyPath);
-      } catch (error) {
-        initializeDatabase(databaseKey);
-        throw error;
+      } else {
+        await rename(restored, livePath);
       }
+      const installed = openEncryptedDatabase(livePath, targetKey);
+      installed.close();
+      if (!wasUnlocked && !requiresPassphrase) {
+        if (!credentialStore) throw new Error('Secure OS credential storage is unavailable');
+        credentialStore.replaceDatabaseKey(targetKey);
+      }
+      databaseKey = Buffer.from(targetKey);
+      startupError = undefined;
       app.relaunch();
       app.exit(0);
+    } catch (error) {
+      if (wasUnlocked && !database && destinationKey && await fileExists(livePath)) {
+        try {
+          initializeDatabase(destinationKey);
+        } catch (reopenError) {
+          startupError = reopenError instanceof Error ? reopenError.message : 'Database recovery failed';
+        }
+      } else if (!database && !(await fileExists(livePath))) {
+        startupError = `Database replacement failed. The last safety copy is ${safetyPath ?? 'unavailable'}.`;
+      }
+      throw error;
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -444,6 +476,16 @@ function toProviderView(profile: ReturnType<ProviderRepository['save']>): Provid
 
 function extensionFor(format: ExportFormat): string {
   return format === 'markdown' ? 'md' : format;
+}
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
 }
 
 async function renderPdf(html: string, options: { landscape: boolean }): Promise<Buffer> {

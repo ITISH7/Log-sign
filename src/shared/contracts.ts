@@ -77,8 +77,8 @@ export const templateBlueprintSchema = z
     narrativeRules: z.array(narrativeRuleSchema),
     outputLayouts: z.partialRecord(exportFormatSchema, outputLayoutSchema).default({})
   })
-  .refine((value) => value.sections.length > 0 || value.fieldMappings.length > 0, {
-    message: 'A template requires at least one section or field mapping'
+  .refine((value) => value.sections.length > 0, {
+    message: 'A template requires at least one report section'
   });
 export type TemplateBlueprint = z.infer<typeof templateBlueprintSchema>;
 

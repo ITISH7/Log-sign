@@ -47,6 +47,12 @@ export class CredentialStore {
     return key;
   }
 
+  replaceDatabaseKey(key: Buffer): void {
+    this.assertSecureBackend();
+    if (key.byteLength !== 32) throw new Error('The database encryption key must be exactly 32 bytes');
+    this.persistence.write('database-key', this.safeStorage.encryptString(key.toString('hex')));
+  }
+
   setProviderCredential(profileId: string, credential: string): void {
     this.assertSecureBackend();
     if (!credential.trim()) throw new Error('A provider credential cannot be empty');

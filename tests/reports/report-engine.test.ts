@@ -259,7 +259,7 @@ describe('ReportEngine', () => {
 
     const sourceChunks = provider.calls.flatMap((call) => call.entries)
       .filter((entry) => entry.id.startsWith('day-1-part'));
-    expect(sourceChunks.map((entry) => entry.note).join('')).toBe(original);
+    expect(JSON.parse(sourceChunks.map((entry) => entry.note).join('')).note).toBe(original);
     expect(provider.calls.every((call) => call.contextLimit === 2_000)).toBe(true);
     expect(result.chunked).toBe(true);
     database.close();

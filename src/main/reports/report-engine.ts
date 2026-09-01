@@ -202,14 +202,18 @@ export class ReportEngine {
       ];
     }
     const entry = entries[0];
-    if (!entry || entry.note.length < 2) {
+    const payload = entry ? providerPayload(entry) : '';
+    if (!entry || payload.length < 2) {
       throw new Error('A single entry exceeds the selected model context limit');
     }
-    const middle = Math.ceil(entry.note.length / 2);
-    const parts = [entry.note.slice(0, middle), entry.note.slice(middle)].map((note, index) => ({
+    const middle = Math.ceil(payload.length / 2);
+    const parts = [payload.slice(0, middle), payload.slice(middle)].map((note, index) => ({
       ...entry,
       id: `${entry.id}-part-${index + 1}`,
-      note
+      note,
+      standardValues: { source: 'chunked-entry-fragment', originalEntryId: entry.id },
+      customValues: {},
+      tags: []
     }));
     return [
       ...await this.splitEntriesToFit(provider, request, [parts[0]!]),
@@ -401,9 +405,25 @@ function assertDraftMatchesRequest(draft: ReportDraft, request: GenerationReques
   const matches = draft.sections.length === request.blueprint.sections.length &&
     draft.sections.every((section, index) => {
       const rule = request.blueprint.sections[index];
-      return rule && section.id === rule.id && section.title === rule.title && section.kind === rule.kind;
+      if (!rule || section.id !== rule.id || section.title !== rule.title || section.kind !== rule.kind) return false;
+      if (rule.kind === 'table') {
+        return Boolean(section.columns && section.rows) &&
+          (rule.sourceFields.length === 0 || JSON.stringify(section.columns) === JSON.stringify(rule.sourceFields));
+      }
+      if (rule.kind === 'paragraph') return section.text !== undefined;
+      return section.items !== undefined;
     });
   if (!matches) throw new Error('Generated report structure does not match the selected template version');
+}
+
+function providerPayload(entry: Entry): string {
+  if (entry.standardValues.source === 'chunked-entry-fragment') return entry.note;
+  return JSON.stringify({
+    note: entry.note,
+    standardValues: entry.standardValues,
+    customValues: entry.customValues,
+    tags: entry.tags
+  });
 }
 
 function hashValue(value: unknown): string {

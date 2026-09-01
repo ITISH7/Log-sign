@@ -31,16 +31,16 @@ export class CodexAppServerTransport implements TextProviderTransport {
     private readonly spawnServer: SpawnAppServer = defaultSpawn
   ) {}
 
-  async healthCheck(): Promise<ProviderHealth> {
+  async healthCheck(signal = new AbortController().signal): Promise<ProviderHealth> {
     try {
       return await this.withServer(async (client) => {
         const result = await client.request<{ account?: { type?: string; email?: string; planType?: string } }>(
-          'account/read', { refreshToken: false }
+          'account/read', { refreshToken: false }, signal
         );
         if (!result.account) return { ok: false, message: 'Codex is installed but not signed in. Use Connect in Settings.' };
         const detail = result.account.email ?? result.account.planType ?? result.account.type ?? 'account';
         return { ok: true, message: `Codex App Server is ready (${detail})` };
-      });
+      }, signal);
     } catch (error) {
       return { ok: false, message: error instanceof Error ? error.message : 'Codex App Server is unavailable' };
     }
@@ -98,7 +98,7 @@ export class CodexAppServerTransport implements TextProviderTransport {
         stopListening();
         stopFailure();
       }
-    });
+    }, signal);
   }
 
   async login(openUrl: (url: string) => Promise<unknown>, signal = new AbortController().signal): Promise<void> {
@@ -126,10 +126,13 @@ export class CodexAppServerTransport implements TextProviderTransport {
         stopListening();
         stopFailure();
       }
-    });
+    }, signal);
   }
 
-  private async withServer<T>(operation: (client: RpcClient, workspace: string) => Promise<T>): Promise<T> {
+  private async withServer<T>(
+    operation: (client: RpcClient, workspace: string) => Promise<T>,
+    signal = new AbortController().signal
+  ): Promise<T> {
     const workspace = await mkdtemp(join(tmpdir(), 'dsr-codex-app-server-'));
     let process: AppServerProcess | undefined;
     try {
@@ -137,7 +140,7 @@ export class CodexAppServerTransport implements TextProviderTransport {
       const client = new RpcClient(process);
       await client.request('initialize', {
         clientInfo: { name: 'dsr_creator', title: 'DSR Creator', version: '0.1.0' }
-      });
+      }, signal);
       client.notify('initialized', {});
       return await operation(client, workspace);
     } finally {

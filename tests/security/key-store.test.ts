@@ -51,6 +51,17 @@ describe('CredentialStore', () => {
     expect(persistence.values.get('database-key')?.toString()).not.toContain(first.toString('hex'));
   });
 
+  it('can replace a lost database key during authenticated backup recovery', () => {
+    const persistence = new MemoryPersistence();
+    const store = new CredentialStore(safeStorage(), persistence, 'win32');
+    store.getOrCreateDatabaseKey();
+    const replacement = Buffer.alloc(32, 12);
+
+    store.replaceDatabaseKey(replacement);
+
+    expect(store.getOrCreateDatabaseKey().equals(replacement)).toBe(true);
+  });
+
   it('stores and removes provider credentials without exposing plaintext', () => {
     const persistence = new MemoryPersistence();
     const store = new CredentialStore(safeStorage(), persistence, 'win32');
