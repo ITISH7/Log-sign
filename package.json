@@ -2,6 +2,12 @@
   "name": "dsr-creator",
   "version": "0.1.0",
   "description": "Local-first Daily Status Report creator for Windows and Linux",
+  "author": {
+    "name": "FiftyFive Technologies",
+    "email": "vanisha.arora@fiftyfivetech.io"
+  },
+  "homepage": "https://github.com/VanishaArora55/dsr-creator",
+  "desktopName": "DSR Creator",
   "main": "out/main/index.js",
   "type": "module",
   "private": true,
@@ -78,6 +84,8 @@
     "linux": {
       "target": ["AppImage", "deb"],
       "category": "Office",
+      "maintainer": "FiftyFive Technologies <vanisha.arora@fiftyfivetech.io>",
+      "syncDesktopName": true,
       "artifactName": "DSR-Creator-${version}-Linux-${arch}.${ext}"
     }
   }
