@@ -258,8 +258,11 @@ describe('ReportEngine', () => {
     const result = await reports.generate(input, { providerProfileId: 'provider-1', exportFormat: 'docx' });
 
     const sourceChunks = provider.calls.flatMap((call) => call.entries)
-      .filter((entry) => entry.id.startsWith('day-1-part'));
-    expect(JSON.parse(sourceChunks.map((entry) => entry.note).join('')).note).toBe(original);
+      .filter((entry) => entry.standardValues.field === 'note');
+    expect(sourceChunks.map((entry) => entry.note).join('')).toBe(original);
+    expect(sourceChunks.every((entry) =>
+      entry.standardValues.originalEntryId === 'day-1' && typeof entry.standardValues.part === 'string'
+    )).toBe(true);
     expect(provider.calls.every((call) => call.contextLimit === 2_000)).toBe(true);
     expect(result.chunked).toBe(true);
     database.close();

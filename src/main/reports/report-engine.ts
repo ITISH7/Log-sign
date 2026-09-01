@@ -202,18 +202,24 @@ export class ReportEngine {
       ];
     }
     const entry = entries[0];
-    const payload = entry ? providerPayload(entry) : '';
-    if (!entry || payload.length < 2) {
+    if (!entry) {
       throw new Error('A single entry exceeds the selected model context limit');
     }
-    const middle = Math.ceil(payload.length / 2);
-    const parts = [payload.slice(0, middle), payload.slice(middle)].map((note, index) => ({
+    if (entry.standardValues.source !== 'chunked-entry-fragment') {
+      const fragments = semanticEntryFragments(entry);
+      return (await Promise.all(
+        fragments.map((fragment) => this.splitEntriesToFit(provider, request, [fragment]))
+      )).flat();
+    }
+    const characters = Array.from(entry.note);
+    if (characters.length < 2) throw new Error('A single entry field exceeds the selected model context limit');
+    const middle = Math.ceil(characters.length / 2);
+    const parentPart = String(entry.standardValues.part ?? '1');
+    const parts = [characters.slice(0, middle).join(''), characters.slice(middle).join('')].map((note, index) => ({
       ...entry,
       id: `${entry.id}-part-${index + 1}`,
       note,
-      standardValues: { source: 'chunked-entry-fragment', originalEntryId: entry.id },
-      customValues: {},
-      tags: []
+      standardValues: { ...entry.standardValues, part: `${parentPart}.${index + 1}` }
     }));
     return [
       ...await this.splitEntriesToFit(provider, request, [parts[0]!]),
@@ -416,14 +422,35 @@ function assertDraftMatchesRequest(draft: ReportDraft, request: GenerationReques
   if (!matches) throw new Error('Generated report structure does not match the selected template version');
 }
 
-function providerPayload(entry: Entry): string {
-  if (entry.standardValues.source === 'chunked-entry-fragment') return entry.note;
-  return JSON.stringify({
-    note: entry.note,
-    standardValues: entry.standardValues,
-    customValues: entry.customValues,
-    tags: entry.tags
-  });
+function semanticEntryFragments(entry: Entry): Entry[] {
+  const candidates: Array<[string, string]> = [['note', entry.note]];
+  for (const [key, value] of Object.entries(entry.standardValues)) {
+    candidates.push([`standard.${key}`, stringifyFieldValue(value)]);
+  }
+  for (const [key, value] of Object.entries(entry.customValues)) {
+    candidates.push([`custom.${key}`, stringifyFieldValue(value)]);
+  }
+  candidates.push(['tags', entry.tags.join(', ')]);
+  const fields = candidates.filter(([, value]) => value.length > 0);
+  return fields.map(([field, note], index) => ({
+    ...entry,
+    id: `${entry.id}-field-${index + 1}`,
+    note,
+    standardValues: {
+      source: 'chunked-entry-fragment',
+      originalEntryId: entry.id,
+      field,
+      part: `${index + 1}/${fields.length}`
+    },
+    customValues: {},
+    tags: []
+  }));
+}
+
+function stringifyFieldValue(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (value === undefined || value === null) return '';
+  return JSON.stringify(value);
 }
 
 function hashValue(value: unknown): string {
