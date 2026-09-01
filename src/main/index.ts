@@ -1,6 +1,6 @@
 import { randomBytes, scryptSync } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { mkdtemp, rename, rm } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -11,7 +11,7 @@ import {
   safeStorage,
   shell
 } from 'electron';
-import { BackupService } from './backup/backup-service';
+import { BackupService, replaceDatabaseFile } from './backup/backup-service';
 import { ExportService } from './export/export-service';
 import { ProviderFactory } from './providers/provider-factory';
 import { CodexAppServerTransport } from './providers/codex-app-server-transport';
@@ -26,7 +26,7 @@ import { TemplateRepository, type TemplateRecord } from './repositories/template
 import { ReportEngine } from './reports/report-engine';
 import { CredentialStore, InsecureCredentialBackendError } from './security/credential-store';
 import { FileSecretPersistence } from './security/file-secret-persistence';
-import { openEncryptedDatabase, type DsrDatabase } from './storage/database';
+import { openEncryptedDatabase, rekeyEncryptedDatabase, type DsrDatabase } from './storage/database';
 import { ReminderScheduler, type ReminderSettings } from './reminders/reminder-scheduler';
 import { TemplateCompiler } from './templates/template-compiler';
 import { parseTemplateSample } from './templates/sample-parser';
@@ -51,6 +51,8 @@ let exporter: ExportService | undefined;
 let databaseKey: Buffer | undefined;
 let credentialStore: CredentialStore | undefined;
 let requiresPassphrase = false;
+let startupError: string | undefined;
+let backupTimer: NodeJS.Timeout | undefined;
 const reminders = new ReminderScheduler();
 const backups = new BackupService();
 const templateCompiler = new TemplateCompiler();
@@ -85,6 +87,12 @@ function requireReports(): ReportEngine {
   return reports;
 }
 
+function openToday(): void {
+  mainWindow?.show();
+  mainWindow?.focus();
+  mainWindow?.webContents.send('navigation:open', 'today');
+}
+
 function osCredentialVault(store: CredentialStore): ProviderCredentialVault {
   return {
     set: (id, value) => store.setProviderCredential(id, value),
@@ -109,16 +117,48 @@ function initializeDatabase(key: Buffer): void {
   reports = new ReportEngine(database, (profileId) => requireProviderFactory().resolve(profileId));
   exporter = new ExportService(renderPdf);
   const reminder = settings.get<ReminderSettings>('reminder') ?? { enabled: false, time: '17:30' };
-  reminders.schedule(reminder, () => {
-    mainWindow?.show();
-    mainWindow?.focus();
-    mainWindow?.webContents.send('navigation:open', 'today');
-  });
-  void backups.createAutomatic(
-    join(dataDirectory, 'backups'),
-    new Date(),
-    (targetPath) => database!.backup(targetPath)
-  ).catch(() => undefined);
+  reminders.schedule(reminder, openToday);
+  scheduleAutomaticBackups();
+}
+
+function scheduleAutomaticBackups(): void {
+  if (backupTimer) clearTimeout(backupTimer);
+  void runAutomaticBackup();
+  const now = new Date();
+  const next = new Date(now);
+  next.setDate(next.getDate() + 1);
+  next.setHours(0, 5, 0, 0);
+  backupTimer = setTimeout(scheduleAutomaticBackups, next.getTime() - now.getTime());
+}
+
+async function runAutomaticBackup(): Promise<void> {
+  if (!database || !settings) return;
+  try {
+    const path = await backups.createAutomatic(
+      join(app.getPath('userData'), 'backups'),
+      new Date(),
+      (targetPath) => database!.backup(targetPath)
+    );
+    settings.set('backup-health', { lastSuccess: new Date().toISOString(), path });
+  } catch (error) {
+    const previous = settings.get<{ lastSuccess?: string }>('backup-health') ?? {};
+    settings.set('backup-health', {
+      ...previous,
+      lastError: error instanceof Error ? error.message : 'Automatic backup failed'
+    });
+  }
+}
+
+function closeDatabase(): void {
+  database?.close();
+  database = undefined;
+  entries = undefined;
+  settings = undefined;
+  templates = undefined;
+  providers = undefined;
+  providerFactory = undefined;
+  reports = undefined;
+  exporter = undefined;
 }
 
 function derivePassphraseKey(passphrase: string): Buffer {
@@ -137,7 +177,7 @@ function derivePassphraseKey(passphrase: string): Buffer {
 }
 
 function registerIpc(): void {
-  ipcMain.handle('security:status', () => ({ locked: !database, requiresPassphrase }));
+  ipcMain.handle('security:status', () => ({ locked: !database, requiresPassphrase, recoveryError: startupError }));
   ipcMain.handle('security:unlock', (_event, passphrase: string) => {
     try {
       initializeDatabase(derivePassphraseKey(passphrase));
@@ -245,12 +285,13 @@ function registerIpc(): void {
     return exporter.export(format, { draft: generation.draft, blueprint, targetPath: result.filePath });
   });
 
-  ipcMain.handle('settings:get', (_event, key) => requireSettings().get(key));
-  ipcMain.handle('settings:set', (_event, key, value) => {
-    requireSettings().set(key, value);
-    if (key === 'reminder') {
-      reminders.schedule(value as ReminderSettings, () => mainWindow?.show());
+  ipcMain.handle('settings:reminder:get', () => requireSettings().get<ReminderSettings>('reminder'));
+  ipcMain.handle('settings:reminder:set', (_event, value: ReminderSettings) => {
+    if (typeof value?.enabled !== 'boolean' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(value.time)) {
+      throw new Error('Invalid reminder settings');
     }
+    requireSettings().set('reminder', value);
+    reminders.schedule(value, openToday);
   });
 
   ipcMain.handle('backup:create', async (_event, input?: { password?: string }) => {
@@ -265,12 +306,13 @@ function registerIpc(): void {
     try {
       const snapshot = join(directory, 'snapshot.db');
       await database.backup(snapshot);
-      await backups.exportPortable(snapshot, result.filePath, input?.password ?? '');
+      await backups.exportPortable(snapshot, result.filePath, input?.password ?? '', databaseKey);
       return { path: result.filePath };
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
   });
+  ipcMain.handle('backup:status', () => requireSettings().get('backup-health') ?? {});
   ipcMain.handle('backup:restore', async (_event, input?: { password?: string }) => {
     if (!database || !databaseKey) throw new Error('The encrypted workspace is locked');
     const result = await dialog.showOpenDialog(mainWindow!, {
@@ -280,18 +322,29 @@ function registerIpc(): void {
     });
     const source = result.filePaths[0];
     if (result.canceled || !source) throw new Error('Restore cancelled');
-    const directory = await mkdtemp(join(tmpdir(), 'dsr-backup-restore-'));
+    const directory = await mkdtemp(join(app.getPath('userData'), '.dsr-backup-restore-'));
     const restored = join(directory, 'restored.db');
     const livePath = join(app.getPath('userData'), 'dsr-creator.db');
-    await backups.restorePortable(source, restored, input?.password ?? '');
-    const validation = openEncryptedDatabase(restored, databaseKey);
-    validation.close();
-    database.close();
-    await rename(livePath, `${livePath}.pre-restore`);
-    await rename(restored, livePath);
-    await rm(directory, { recursive: true, force: true });
-    app.relaunch();
-    app.exit(0);
+    try {
+      const material = await backups.restorePortable(source, restored, input?.password ?? '');
+      if (material.databaseKey && !material.databaseKey.equals(databaseKey)) {
+        rekeyEncryptedDatabase(restored, material.databaseKey, databaseKey);
+      }
+      const validation = openEncryptedDatabase(restored, databaseKey);
+      validation.close();
+      const safetyPath = `${livePath}.pre-restore-${Date.now()}-${randomBytes(4).toString('hex')}`;
+      closeDatabase();
+      try {
+        await replaceDatabaseFile(livePath, restored, safetyPath);
+      } catch (error) {
+        initializeDatabase(databaseKey);
+        throw error;
+      }
+      app.relaunch();
+      app.exit(0);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   ipcMain.handle('dialog:save', async (_event, options) => {
@@ -424,7 +477,7 @@ app.whenReady().then(async () => {
       requiresPassphrase = true;
       credentialStore = undefined;
     }
-    else throw error;
+    else startupError = error instanceof Error ? error.message : 'The encrypted database could not be opened';
   }
   registerIpc();
   await createWindow();
@@ -433,5 +486,6 @@ app.whenReady().then(async () => {
 app.on('window-all-closed', () => app.quit());
 app.on('before-quit', () => {
   reminders.cancel();
-  database?.close();
+  if (backupTimer) clearTimeout(backupTimer);
+  closeDatabase();
 });

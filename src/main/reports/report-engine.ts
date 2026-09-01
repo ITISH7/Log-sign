@@ -65,31 +65,45 @@ export class ReportEngine {
     });
     const cached = this.readCache(cacheKey);
     if (cached) {
-      return this.recordJob(request, options, cacheKey, cached, {
-        inputTokens: 0,
-        cacheHit: true,
-        chunked: false
-      });
+      try {
+        assertDraftMatchesRequest(cached, request);
+        return this.recordJob(request, options, cacheKey, cached, {
+          inputTokens: 0,
+          cacheHit: true,
+          chunked: false
+        });
+      } catch {
+        this.database.prepare('DELETE FROM generation_cache WHERE cache_key = ?').run(cacheKey);
+      }
     }
 
     let draft: ReportDraft;
     let inputTokens = 0;
     let chunked = false;
+    let providerInputTokens: number | undefined;
+    let outputTokens: number | undefined;
     if (request.blueprint.narrativeRules.length === 0) {
       draft = buildDeterministicDraft(request);
     } else {
       const provider = this.resolveProvider(options.providerProfileId);
+      provider.resetUsage?.();
       const estimate = await provider.estimateTokens(request);
       inputTokens = estimate.inputTokens;
       chunked = estimate.requiresChunking;
       draft = chunked
         ? await this.generateChunked(provider, request, options.providerProfileId, options.signal)
         : await provider.generateStructured(request, options.signal ?? new AbortController().signal);
+      const usage = provider.getUsage?.();
+      providerInputTokens = usage?.inputTokens;
+      outputTokens = usage?.outputTokens;
     }
     draft = reportDraftSchema.parse(draft);
+    assertDraftMatchesRequest(draft, request);
     this.writeCache(cacheKey, 'report', draft);
     return this.recordJob(request, options, cacheKey, draft, {
       inputTokens,
+      providerInputTokens,
+      outputTokens,
       cacheHit: false,
       chunked
     });
@@ -135,43 +149,87 @@ export class ReportEngine {
       byDate.set(entry.workDate, day);
     }
 
-    const summaries: Array<{ date: string; draft: ReportDraft }> = [];
+    const summaries: Entry[] = [];
     for (const [date, entries] of [...byDate.entries()].sort(([left], [right]) => left.localeCompare(right))) {
-      const dailyRequest: GenerationRequest = {
-        ...request,
-        entries,
-        dateFrom: date,
-        dateTo: date,
-        contextLimit: Math.max(request.contextLimit, 32_768)
-      };
-      const dailyKey = hashValue({
-        kind: 'day-summary',
-        promptVersion: PROMPT_VERSION,
-        providerProfileId,
-        request: dailyRequest
-      });
-      let dailyDraft = this.readCache(dailyKey);
-      if (!dailyDraft) {
-        dailyDraft = reportDraftSchema.parse(await provider.generateStructured(dailyRequest, signal));
-        this.writeCache(dailyKey, 'day-summary', dailyDraft);
+      const chunks = await this.splitEntriesToFit(provider, { ...request, dateFrom: date, dateTo: date }, entries);
+      for (let index = 0; index < chunks.length; index += 1) {
+        const dailyRequest: GenerationRequest = { ...request, entries: chunks[index]!, dateFrom: date, dateTo: date };
+        const draft = await this.generateCachedSummary(provider, dailyRequest, providerProfileId, signal, `day-${index}`);
+        summaries.push(summaryEntry(date, draft, `summary-${date}-${index}`));
       }
-      summaries.push({ date, draft: dailyDraft });
     }
 
-    const summaryEntries = summaries.map(({ date, draft }) => ({
-      id: `summary-${date}`,
-      workDate: date,
-      note: draft.sections
-        .flatMap((section) => section.items ?? (section.text ? [section.text] : []))
-        .join('\n'),
-      standardValues: { source: 'cached-daily-summary' },
-      customValues: {},
-      tags: [],
-      createdAt: `${date}T00:00:00.000Z`,
-      updatedAt: `${date}T00:00:00.000Z`
-    }));
+    let current = summaries;
+    for (let level = 0; level < 8; level += 1) {
+      const finalRequest = { ...request, entries: current };
+      const estimate = await provider.estimateTokens(finalRequest);
+      if (!estimate.requiresChunking) return provider.generateStructured(finalRequest, signal);
+      const groups = await this.splitEntriesToFit(provider, finalRequest, current);
+      if (groups.length === 1 && groups[0]!.length === current.length) {
+        throw new Error('The selected model context limit is too small to reduce this report safely');
+      }
+      const reduced: Entry[] = [];
+      for (let index = 0; index < groups.length; index += 1) {
+        const group = groups[index]!;
+        const from = group[0]!.workDate;
+        const to = group[group.length - 1]!.workDate;
+        const draft = await this.generateCachedSummary(
+          provider,
+          { ...request, entries: group, dateFrom: from, dateTo: to },
+          providerProfileId,
+          signal,
+          `reduce-${level}-${index}`
+        );
+        reduced.push(summaryEntry(from, draft, `summary-reduce-${level}-${index}`));
+      }
+      current = reduced;
+    }
+    throw new Error('The report could not be reduced within the selected model context limit');
+  }
 
-    return provider.generateStructured({ ...request, entries: summaryEntries }, signal);
+  private async splitEntriesToFit(
+    provider: ProviderAdapter,
+    request: GenerationRequest,
+    entries: Entry[]
+  ): Promise<Entry[][]> {
+    const candidate = { ...request, entries };
+    if (!(await provider.estimateTokens(candidate)).requiresChunking) return [entries];
+    if (entries.length > 1) {
+      const middle = Math.ceil(entries.length / 2);
+      return [
+        ...await this.splitEntriesToFit(provider, request, entries.slice(0, middle)),
+        ...await this.splitEntriesToFit(provider, request, entries.slice(middle))
+      ];
+    }
+    const entry = entries[0];
+    if (!entry || entry.note.length < 2) {
+      throw new Error('A single entry exceeds the selected model context limit');
+    }
+    const middle = Math.ceil(entry.note.length / 2);
+    const parts = [entry.note.slice(0, middle), entry.note.slice(middle)].map((note, index) => ({
+      ...entry,
+      id: `${entry.id}-part-${index + 1}`,
+      note
+    }));
+    return [
+      ...await this.splitEntriesToFit(provider, request, [parts[0]!]),
+      ...await this.splitEntriesToFit(provider, request, [parts[1]!])
+    ];
+  }
+
+  private async generateCachedSummary(
+    provider: ProviderAdapter,
+    request: GenerationRequest,
+    providerProfileId: string | undefined,
+    signal: AbortSignal,
+    stage: string
+  ): Promise<ReportDraft> {
+    const key = hashValue({ kind: 'summary', stage, promptVersion: PROMPT_VERSION, providerProfileId, request });
+    const cached = this.readCache(key);
+    if (cached) return cached;
+    const draft = reportDraftSchema.parse(await provider.generateStructured(request, signal));
+    this.writeCache(key, 'summary', draft);
+    return draft;
   }
 
   private readCache(key: string): ReportDraft | undefined {
@@ -198,7 +256,7 @@ export class ReportEngine {
     options: GenerationOptions,
     cacheKey: string,
     draft: ReportDraft,
-    metrics: { inputTokens: number; cacheHit: boolean; chunked: boolean }
+    metrics: { inputTokens: number; providerInputTokens?: number; outputTokens?: number; cacheHit: boolean; chunked: boolean }
   ): GenerationResult {
     const id = randomUUID();
     const timestamp = new Date().toISOString();
@@ -207,8 +265,8 @@ export class ReportEngine {
         INSERT INTO generation_jobs(
           id, date_from, date_to, template_version_id, provider_profile_id, model,
           export_format, cache_key, status, draft, warnings, input_tokens,
-          cache_hit, chunked, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?)
+          provider_input_tokens, output_tokens, cache_hit, chunked, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         id,
@@ -222,6 +280,8 @@ export class ReportEngine {
         JSON.stringify(draft),
         JSON.stringify(draft.warnings),
         metrics.inputTokens,
+        metrics.providerInputTokens ?? null,
+        metrics.outputTokens ?? null,
         metrics.cacheHit ? 1 : 0,
         metrics.chunked ? 1 : 0,
         timestamp,
@@ -255,11 +315,17 @@ function buildDeterministicDraft(request: GenerationRequest): ReportDraft {
           kind: 'table' as const,
           columns,
           rows: request.entries.map((entry) =>
-            Object.fromEntries(columns.map((column) => [column, readEntryField(entry, column)]))
+            Object.fromEntries(columns.map((column) => [column, readMappedField(entry, column, request.blueprint)]))
           )
         };
       }
-      const items = request.entries.map((entry) => entry.note);
+      const sourceFields = section.sourceFields.length > 0 ? section.sourceFields : ['note'];
+      const items = request.entries.flatMap((entry) =>
+        sourceFields.map((field) => readMappedField(entry, field, request.blueprint)).filter((value) => value.trim().length > 0)
+      );
+      if (section.kind === 'metadata') {
+        return { id: section.id, title: section.title, kind: 'metadata' as const, items };
+      }
       return section.kind === 'paragraph'
         ? { id: section.id, title: section.title, kind: 'paragraph' as const, text: items.join('\n') }
         : { id: section.id, title: section.title, kind: 'bullets' as const, items };
@@ -268,11 +334,76 @@ function buildDeterministicDraft(request: GenerationRequest): ReportDraft {
   });
 }
 
-function readEntryField(entry: Entry, field: string): string {
+function readMappedField(entry: Entry, target: string, blueprint: TemplateBlueprint): string {
+  const mapping = blueprint.fieldMappings.find((candidate) => candidate.target === target);
+  const source = mapping?.source ?? target;
+  const raw = readEntryValue(entry, source);
+  switch (mapping?.transform ?? 'identity') {
+    case 'join':
+      return Array.isArray(raw) ? raw.map(String).join(', ') : String(raw ?? '');
+    case 'sum': {
+      const values = Array.isArray(raw) ? raw : [raw];
+      return String(values.reduce<number>((total, value) => total + (Number(value) || 0), 0));
+    }
+    case 'duration':
+      return formatDurationHours(raw);
+    case 'date': {
+      const date = raw instanceof Date ? raw : new Date(String(raw ?? ''));
+      return Number.isNaN(date.getTime()) ? String(raw ?? '') : date.toISOString().slice(0, 10);
+    }
+    case 'identity':
+      return Array.isArray(raw) ? raw.map(String).join(', ') : String(raw ?? '');
+  }
+}
+
+function readEntryValue(entry: Entry, field: string): unknown {
   if (field === 'note') return entry.note;
   if (field === 'workDate') return entry.workDate;
-  if (field === 'tags') return entry.tags.join(', ');
-  return String(entry.standardValues[field] ?? entry.customValues[field] ?? '');
+  if (field === 'tags') return entry.tags;
+  return entry.standardValues[field] ?? entry.customValues[field];
+}
+
+function formatDurationHours(value: unknown): string {
+  if (typeof value === 'number') return String(value);
+  const text = String(value ?? '').trim();
+  if (!text) return '';
+  const hours = Number(text.match(/(\d+(?:\.\d+)?)\s*h/i)?.[1] ?? 0);
+  const minutes = Number(text.match(/(\d+(?:\.\d+)?)\s*m/i)?.[1] ?? 0);
+  if (hours || minutes) return String(Number((hours + minutes / 60).toFixed(2)));
+  const numeric = Number(text);
+  return Number.isFinite(numeric) ? String(numeric) : text;
+}
+
+function summaryEntry(date: string, draft: ReportDraft, id: string): Entry {
+  const note = draft.sections
+    .flatMap((section) => [
+      ...(section.items ?? []),
+      ...(section.text ? [section.text] : []),
+      ...(section.rows ? [JSON.stringify(section.rows)] : [])
+    ])
+    .join('\n');
+  return {
+    id,
+    workDate: date,
+    note,
+    standardValues: { source: 'cached-summary' },
+    customValues: {},
+    tags: [],
+    createdAt: `${date}T00:00:00.000Z`,
+    updatedAt: `${date}T00:00:00.000Z`
+  };
+}
+
+function assertDraftMatchesRequest(draft: ReportDraft, request: GenerationRequest): void {
+  if (draft.metadata.dateFrom !== request.dateFrom || draft.metadata.dateTo !== request.dateTo) {
+    throw new Error('Generated report dates do not match the selected date range');
+  }
+  const matches = draft.sections.length === request.blueprint.sections.length &&
+    draft.sections.every((section, index) => {
+      const rule = request.blueprint.sections[index];
+      return rule && section.id === rule.id && section.title === rule.title && section.kind === rule.kind;
+    });
+  if (!matches) throw new Error('Generated report structure does not match the selected template version');
 }
 
 function hashValue(value: unknown): string {

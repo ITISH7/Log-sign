@@ -15,9 +15,13 @@ const importTemplate = vi.fn();
 const listProviders = vi.fn();
 const generateReport = vi.fn();
 const exportReport = vi.fn();
+let navigationListener: ((page: 'today') => void) | undefined;
 
 function api(): DsrApi {
   return {
+    navigation: {
+      onOpen: vi.fn((listener) => { navigationListener = listener; return vi.fn(); })
+    },
     security: {
       status: securityStatus,
       unlock
@@ -51,10 +55,11 @@ function api(): DsrApi {
       updateDraft: vi.fn()
     },
     settings: {
-      get: vi.fn(),
+      get: vi.fn().mockResolvedValue(undefined),
       set: vi.fn()
     },
     backup: {
+      status: vi.fn().mockResolvedValue({}),
       create: vi.fn(),
       restore: vi.fn()
     }
@@ -71,6 +76,7 @@ beforeEach(() => {
   listProviders.mockReset().mockResolvedValue([]);
   generateReport.mockReset();
   exportReport.mockReset();
+  navigationListener = undefined;
   Object.defineProperty(window, 'dsr', { value: api(), configurable: true });
 });
 
@@ -86,6 +92,19 @@ describe('Workspace security', () => {
 
     await waitFor(() => expect(unlock).toHaveBeenCalledWith('a secure local passphrase'));
     await waitFor(() => expect(listEntries).toHaveBeenCalled());
+  });
+});
+
+describe('Reminder navigation', () => {
+  it('opens the Today screen when the main process sends a reminder navigation event', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: /Settings/ }));
+    expect(screen.getByRole('heading', { name: 'Settings' })).toBeInTheDocument();
+
+    navigationListener?.('today');
+
+    expect(await screen.findByRole('heading', { name: 'What moved forward today?' })).toBeInTheDocument();
   });
 });
 

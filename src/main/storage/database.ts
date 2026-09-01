@@ -9,15 +9,36 @@ export function openEncryptedDatabase(path: string, key: Buffer): DsrDatabase {
   }
 
   const database = new Database(path);
-  database.pragma("cipher='sqlcipher'");
-  database.pragma('legacy=4');
-  database.pragma(`key="x'${key.toString('hex')}'"`);
-  database.pragma('foreign_keys = ON');
-  database.pragma('journal_mode = WAL');
-  database.prepare('SELECT count(*) AS count FROM sqlite_master').get();
+  try {
+    database.pragma("cipher='sqlcipher'");
+    database.pragma('legacy=4');
+    database.pragma(`key="x'${key.toString('hex')}'"`);
+    database.pragma('foreign_keys = ON');
+    database.pragma('journal_mode = WAL');
+    database.prepare('SELECT count(*) AS count FROM sqlite_master').get();
 
-  applyMigrations(database);
-  return database;
+    applyMigrations(database);
+    return database;
+  } catch (error) {
+    database.close();
+    throw error;
+  }
+}
+
+export function rekeyEncryptedDatabase(path: string, currentKey: Buffer, nextKey: Buffer): void {
+  if (currentKey.byteLength !== 32 || nextKey.byteLength !== 32) {
+    throw new Error('Database encryption keys must be exactly 32 bytes');
+  }
+  const database = new Database(path);
+  try {
+    database.pragma("cipher='sqlcipher'");
+    database.pragma('legacy=4');
+    database.pragma(`key="x'${currentKey.toString('hex')}'"`);
+    database.prepare('SELECT count(*) AS count FROM sqlite_master').get();
+    database.pragma(`rekey="x'${nextKey.toString('hex')}'"`);
+  } finally {
+    database.close();
+  }
 }
 
 function applyMigrations(database: DsrDatabase): void {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { PassThrough, Writable } from 'node:stream';
+import { EventEmitter } from 'node:events';
 import { CodexAppServerTransport, type AppServerProcess } from '../../src/main/providers/codex-app-server-transport';
 import {
   StructuredTextProvider,
@@ -83,6 +84,26 @@ describe('StructuredTextProvider', () => {
     ).rejects.toThrow('Provider returned invalid structured report data');
   });
 
+  it('repairs schema-valid output that does not match the selected template and dates', async () => {
+    const wrong = JSON.stringify({
+      schemaVersion: 1,
+      metadata: {
+        title: 'Unrelated', dateFrom: '2026-08-30', dateTo: '2026-08-30', generatedAt: '2026-08-31T18:00:00.000Z'
+      },
+      sections: [{ id: 'other', title: 'Other', kind: 'paragraph', text: 'Wrong report' }],
+      warnings: []
+    });
+    const transport = new SequenceTransport([{ text: wrong }, { text: validDraft }]);
+
+    const draft = await new StructuredTextProvider(transport).generateStructured(
+      request(), new AbortController().signal
+    );
+
+    expect(draft.sections[0]?.id).toBe('done');
+    expect(transport.prompts).toHaveLength(2);
+    expect(transport.prompts[1]).toContain('Required template blueprint');
+  });
+
   it('marks input for chunking at 75 percent of the model context', async () => {
     const provider = new StructuredTextProvider(new SequenceTransport([]));
     const smallLimit = request(80);
@@ -138,5 +159,27 @@ describe('CodexAppServerTransport', () => {
       approvalPolicy: 'never',
       sandboxPolicy: { type: 'readOnly', access: { type: 'restricted' } }
     });
+  });
+
+  it('rejects pending RPC calls and terminates the process when the app server exits', async () => {
+    const events = new EventEmitter();
+    const serverOutput = new PassThrough();
+    let killed = false;
+    let markRequestWritten!: () => void;
+    const requestWritten = new Promise<void>((resolve) => { markRequestWritten = resolve; });
+    const process: AppServerProcess = {
+      stdout: serverOutput,
+      stderr: new PassThrough(),
+      stdin: new Writable({ write(_chunk, _encoding, callback) { markRequestWritten(); callback(); } }),
+      kill: () => { killed = true; return true; },
+      once: (event, listener) => events.once(event, listener)
+    };
+    const transport = new CodexAppServerTransport('configured-model', async () => process);
+    const completion = transport.complete('Create JSON only', new AbortController().signal);
+    await requestWritten;
+    events.emit('exit', 2);
+
+    await expect(completion).rejects.toThrow('exited with code 2');
+    expect(killed).toBe(true);
   });
 });

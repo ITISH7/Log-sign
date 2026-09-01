@@ -89,10 +89,10 @@ function toMarkdown(draft: ReportDraft): string {
     if (section.text) lines.push(section.text, '');
     if (section.items) lines.push(...section.items.map((item) => `- ${item}`), '');
     if (section.columns && section.rows) {
-      lines.push(`| ${section.columns.join(' | ')} |`);
+      lines.push(`| ${section.columns.map(markdownCell).join(' | ')} |`);
       lines.push(`| ${section.columns.map(() => '---').join(' | ')} |`);
       for (const row of section.rows) {
-        lines.push(`| ${section.columns.map((column) => row[column] ?? '').join(' | ')} |`);
+        lines.push(`| ${section.columns.map((column) => markdownCell(row[column] ?? '')).join(' | ')} |`);
       }
       lines.push('');
     }
@@ -131,7 +131,12 @@ function toCsv(draft: ReportDraft): string {
 }
 
 function csvCell(value: string): string {
-  return /[",\n\r]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value;
+  const safe = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+  return /[",\n\r]/.test(safe) ? `"${safe.replaceAll('"', '""')}"` : safe;
+}
+
+function markdownCell(value: string): string {
+  return value.replaceAll('\\', '\\\\').replaceAll('|', '\\|').replace(/\r?\n/g, '<br>');
 }
 
 async function toXlsx(draft: ReportDraft, blueprint: TemplateBlueprint): Promise<Buffer> {

@@ -4,6 +4,13 @@ import type { DsrApi } from '../shared/ipc';
 const invoke = <T>(channel: string, ...args: unknown[]) => ipcRenderer.invoke(channel, ...args) as Promise<T>;
 
 const api: DsrApi = {
+  navigation: {
+    onOpen: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, page: 'today') => listener(page);
+      ipcRenderer.on('navigation:open', handler);
+      return () => ipcRenderer.removeListener('navigation:open', handler);
+    }
+  },
   security: {
     status: () => invoke('security:status'),
     unlock: (passphrase) => invoke('security:unlock', passphrase)
@@ -37,10 +44,11 @@ const api: DsrApi = {
     updateDraft: (id, draft) => invoke('reports:update-draft', id, draft)
   },
   settings: {
-    get: (key) => invoke('settings:get', key),
-    set: (key, value) => invoke('settings:set', key, value)
+    get: () => invoke('settings:reminder:get'),
+    set: (_key, value) => invoke('settings:reminder:set', value)
   },
   backup: {
+    status: () => invoke('backup:status'),
     create: (input) => invoke('backup:create', input),
     restore: (input) => invoke('backup:restore', input)
   }

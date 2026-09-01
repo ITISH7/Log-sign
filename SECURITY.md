@@ -14,9 +14,8 @@ Codex App Server and Claude Code generation run in a newly created empty tempora
 
 ## Backups
 
-Automatic snapshots retain seven recent daily files and four older weekly representatives. Since the source is SQLCipher, automatic snapshots remain encrypted. Portable `.dsrbackup` files add independent Argon2id-derived AES-GCM encryption. Restore decrypts to a temporary file, validates it with the current database key, retains a pre-restore safety database, atomically installs the restored database, and restarts the application.
+Automatic snapshots retain seven recent daily files and four older weekly representatives. Since the source is SQLCipher, automatic snapshots remain encrypted. Portable `.dsrbackup` files add independent Argon2id-derived AES-GCM encryption around both the SQLCipher snapshot and its random key. On another device, restore decrypts to a temporary file and rekeys it to that device's current database key. It then validates the database, retains a timestamped pre-restore safety copy, atomically installs the restored database, and restarts the application.
 
 ## Reporting a vulnerability
 
 Do not include API keys, passphrases, database files, report contents, or portable backups in an issue. Provide a minimal reproduction with synthetic content and the affected version.
-

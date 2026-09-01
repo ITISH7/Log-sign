@@ -139,6 +139,8 @@ export interface ProviderAdapter {
   healthCheck(): Promise<ProviderHealth>;
   estimateTokens(request: GenerationRequest): Promise<TokenEstimate>;
   generateStructured(request: GenerationRequest, signal: AbortSignal): Promise<ReportDraft>;
+  resetUsage?(): void;
+  getUsage?(): { inputTokens: number; outputTokens: number };
 }
 
 export interface ValidationResult {

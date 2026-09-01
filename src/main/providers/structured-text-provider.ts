@@ -19,11 +19,15 @@ export interface TextProviderTransport {
 }
 
 export class StructuredTextProvider implements ProviderAdapter {
+  private usage = { inputTokens: 0, outputTokens: 0 };
   constructor(private readonly transport: TextProviderTransport) {}
 
   healthCheck(): Promise<ProviderHealth> {
     return this.transport.healthCheck();
   }
+
+  resetUsage(): void { this.usage = { inputTokens: 0, outputTokens: 0 }; }
+  getUsage() { return { ...this.usage }; }
 
   async estimateTokens(request: GenerationRequest): Promise<TokenEstimate> {
     const inputTokens = Math.ceil(buildGenerationPrompt(request).length / 4);
@@ -40,14 +44,21 @@ export class StructuredTextProvider implements ProviderAdapter {
   ): Promise<ReportDraft> {
     throwIfAborted(signal);
     const first = await this.transport.complete(buildGenerationPrompt(request), signal);
-    const parsed = parseDraft(first.text);
+    this.addUsage(first);
+    const parsed = parseDraft(first.text, request);
     if (parsed) return parsed;
 
     throwIfAborted(signal);
     const repaired = await this.transport.complete(buildRepairPrompt(first.text, request), signal);
-    const repairedDraft = parseDraft(repaired.text);
+    this.addUsage(repaired);
+    const repairedDraft = parseDraft(repaired.text, request);
     if (repairedDraft) return repairedDraft;
     throw new Error('Provider returned invalid structured report data after one repair attempt');
+  }
+
+  private addUsage(completion: TextCompletion): void {
+    this.usage.inputTokens += completion.inputTokens ?? 0;
+    this.usage.outputTokens += completion.outputTokens ?? 0;
   }
 }
 
@@ -67,15 +78,25 @@ function buildRepairPrompt(invalid: string, request: GenerationRequest): string 
     'Repair the invalid response below into valid DSR_REPORT_SCHEMA_VERSION=1 JSON.',
     'Return JSON only and preserve factual content. Do not add facts.',
     `Required date range: ${request.dateFrom} through ${request.dateTo}`,
+    `Required template blueprint: ${JSON.stringify(request.blueprint)}`,
     `Invalid response: ${invalid}`
   ].join('\n');
 }
 
-function parseDraft(text: string): ReportDraft | undefined {
+function parseDraft(text: string, request: GenerationRequest): ReportDraft | undefined {
   try {
     const candidate = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
     const parsed = reportDraftSchema.safeParse(JSON.parse(candidate));
-    return parsed.success ? parsed.data : undefined;
+    if (!parsed.success) return undefined;
+    if (parsed.data.metadata.dateFrom !== request.dateFrom || parsed.data.metadata.dateTo !== request.dateTo) {
+      return undefined;
+    }
+    if (parsed.data.sections.length !== request.blueprint.sections.length) return undefined;
+    const matchesBlueprint = parsed.data.sections.every((section, index) => {
+      const rule = request.blueprint.sections[index];
+      return rule && section.id === rule.id && section.title === rule.title && section.kind === rule.kind;
+    });
+    return matchesBlueprint ? parsed.data : undefined;
   } catch {
     return undefined;
   }

@@ -2,6 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import ExcelJS from 'exceljs';
+import { Document, HeadingLevel, Packer, Paragraph } from 'docx';
 import { afterEach, describe, expect, it } from 'vitest';
 import { TemplateRepository } from '../../src/main/repositories/template-repository';
 import { openEncryptedDatabase } from '../../src/main/storage/database';
@@ -129,6 +130,7 @@ describe('TemplateCompiler', () => {
     });
 
     expect(result.sections.map((section) => section.title)).toEqual(['Completed', 'Blockers']);
+    expect(result.sections[1]?.sourceFields).toEqual(['blockers']);
     expect(result.narrativeRules).toEqual([]);
   });
 
@@ -167,5 +169,27 @@ describe('TemplateCompiler', () => {
     expect(prompts[0]).not.toContain(sample.text);
     expect(result.templateVersionId).toBe('version-2');
     expect(result.narrativeRules).toHaveLength(1);
+  });
+
+  it('never sends DOCX paragraph body content in the template-compilation prompt', async () => {
+    const data = await Packer.toBuffer(new Document({ sections: [{ children: [
+      new Paragraph({ text: 'Completed', heading: HeadingLevel.HEADING_1 }),
+      new Paragraph('CLIENT SECRET BODY CONTENT')
+    ] }] }));
+    const sample = await parseTemplateSample({ name: 'private.docx', data });
+    const prompts: string[] = [];
+    const transport: TextProviderTransport = {
+      healthCheck: async () => ({ ok: true, message: 'ready' }),
+      complete: async (prompt) => {
+        prompts.push(prompt);
+        return { text: JSON.stringify(blueprint('ignored')) };
+      }
+    };
+
+    await new TemplateCompiler().compile({ versionId: 'safe-version', instructions: 'Keep this layout', sample, transport });
+
+    expect(prompts[0]).toContain('Completed');
+    expect(prompts[0]).not.toContain('CLIENT SECRET BODY CONTENT');
+    expect(sample.structure).not.toHaveProperty('html');
   });
 });

@@ -38,8 +38,26 @@ function buildCompilePrompt(
     'Use narrativeRules only when rewriting, summarization, grouping, or prose generation is required.',
     `templateVersionId=${JSON.stringify(versionId)}`,
     `instructions=${JSON.stringify(instructions.trim())}`,
-    `parsedStructure=${JSON.stringify(sample ? { kind: sample.kind, structure: sample.structure } : { kind: 'written' })}`
+    `parsedStructure=${JSON.stringify(sample ? compactStructure(sample) : { kind: 'written' })}`
   ].join('\n');
+}
+
+function compactStructure(sample: ParsedTemplateSample): Record<string, unknown> {
+  return {
+    kind: sample.kind,
+    structure: {
+      ...(sample.structure.headings ? { headings: sample.structure.headings } : {}),
+      ...(sample.structure.columns ? { columns: sample.structure.columns } : {}),
+      ...(sample.structure.sheets ? {
+        sheets: sample.structure.sheets.map((sheet) => ({
+          name: sheet.name,
+          columns: sheet.columns,
+          widths: sheet.widths,
+          rowCount: sheet.rowCount
+        }))
+      } : {})
+    }
+  };
 }
 
 function buildLocalBlueprint(input: TemplateCompileInput): TemplateBlueprint {
@@ -57,7 +75,7 @@ function buildLocalBlueprint(input: TemplateCompileInput): TemplateBlueprint {
       id: slug(title) || `section-${index + 1}`,
       title,
       kind: inferSectionKind(title),
-      sourceFields: ['note'],
+      sourceFields: inferSourceFields(title),
       required: true
     }));
   }
@@ -94,6 +112,15 @@ function normalizeColumns(columns: string[]): string[] {
 
 function inferSectionKind(title: string): ReportSectionRule['kind'] {
   return /summary|overview|narrative/i.test(title) ? 'paragraph' : 'bullets';
+}
+
+function inferSourceFields(title: string): string[] {
+  if (/blocker|impediment|risk/i.test(title)) return ['blockers'];
+  if (/link|reference|ticket|pull request|\bpr\b/i.test(title)) return ['links'];
+  if (/duration|hours|time spent/i.test(title)) return ['duration'];
+  if (/project/i.test(title)) return ['project'];
+  if (/status/i.test(title)) return ['status'];
+  return ['note'];
 }
 
 function slug(value: string): string {

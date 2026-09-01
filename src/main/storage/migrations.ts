@@ -100,5 +100,11 @@ export const migrations = [
         updated_at TEXT NOT NULL
       );
     `
+  },
+  {
+    version: 2,
+    sql: `
+      ALTER TABLE generation_jobs ADD COLUMN provider_input_tokens INTEGER;
+    `
   }
 ] as const;

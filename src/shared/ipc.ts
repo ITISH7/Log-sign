@@ -75,8 +75,11 @@ export interface GenerationView {
 }
 
 export interface DsrApi {
+  navigation: {
+    onOpen(listener: (page: 'today') => void): () => void;
+  };
   security: {
-    status(): Promise<{ locked: boolean; requiresPassphrase: boolean }>;
+    status(): Promise<{ locked: boolean; requiresPassphrase: boolean; recoveryError?: string }>;
     unlock(passphrase: string): Promise<{ unlocked: boolean }>;
   };
   entries: {
@@ -108,10 +111,11 @@ export interface DsrApi {
     updateDraft(id: string, draft: ReportDraft): Promise<void>;
   };
   settings: {
-    get(key: string): Promise<unknown>;
-    set(key: string, value: unknown): Promise<void>;
+    get(key: 'reminder'): Promise<{ enabled: boolean; time: string } | undefined>;
+    set(key: 'reminder', value: { enabled: boolean; time: string }): Promise<void>;
   };
   backup: {
+    status(): Promise<{ lastSuccess?: string; lastError?: string }>;
     create(input?: { password?: string }): Promise<{ path: string }>;
     restore(input?: { password?: string }): Promise<void>;
   };

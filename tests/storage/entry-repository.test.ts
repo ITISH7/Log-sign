@@ -28,6 +28,17 @@ describe('encrypted database', () => {
 
     expect(header).not.toBe('SQLite format 3\u0000');
   });
+
+  it('can reopen with the correct key after a failed wrong-key attempt', async () => {
+    const { database, databasePath } = await createRepository();
+    database.close();
+
+    expect(() => openEncryptedDatabase(databasePath, Buffer.alloc(32, 3))).toThrow();
+    const reopened = openEncryptedDatabase(databasePath, Buffer.alloc(32, 7));
+
+    expect(reopened.prepare('SELECT count(*) AS count FROM schema_migrations').get()).toEqual({ count: 2 });
+    reopened.close();
+  });
 });
 
 describe('EntryRepository', () => {

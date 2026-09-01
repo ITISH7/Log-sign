@@ -9,7 +9,6 @@ export interface ParsedTemplateSample {
     headings?: string[];
     sheets?: Array<{ name: string; columns: string[]; widths: number[]; rowCount: number }>;
     columns?: string[];
-    html?: string;
   };
 }
 
@@ -72,7 +71,7 @@ async function parseDocx(data: Buffer): Promise<ParsedTemplateSample> {
   const headings = Array.from(html.matchAll(/<h[1-6][^>]*>(.*?)<\/h[1-6]>/gi)).map((match) =>
     match[1]!.replace(/<[^>]+>/g, '').trim()
   );
-  return { kind: 'docx', text, structure: { headings, html } };
+  return { kind: 'docx', text, structure: { headings } };
 }
 
 function parseCsvLine(line: string): string[] {

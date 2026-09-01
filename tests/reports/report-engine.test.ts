@@ -71,10 +71,13 @@ class CountingProvider implements ProviderAdapter {
     return { ok: true, message: 'ready' };
   }
   async estimateTokens(input: GenerationRequest): Promise<TokenEstimate> {
+    const requiresChunking = input.contextLimit <= 100 &&
+      input.entries.length > 1 &&
+      input.entries.some((entry) => !entry.id.startsWith('summary-'));
     return {
-      inputTokens: input.contextLimit <= 100 ? 90 : 100,
+      inputTokens: requiresChunking ? 90 : 40,
       contextLimit: input.contextLimit,
-      requiresChunking: input.contextLimit <= 100
+      requiresChunking
     };
   }
   async generateStructured(input: GenerationRequest): Promise<ReportDraft> {
@@ -95,6 +98,32 @@ class CountingProvider implements ProviderAdapter {
           items: input.entries.map((entry) => entry.note)
         }
       ],
+      warnings: []
+    };
+  }
+  resetUsage(): void {}
+  getUsage() { return { inputTokens: this.calls.length ? 88 : 0, outputTokens: this.calls.length ? 22 : 0 }; }
+}
+
+class LengthProvider extends CountingProvider {
+  override async estimateTokens(input: GenerationRequest): Promise<TokenEstimate> {
+    const inputTokens = input.entries.reduce((total, entry) => total + entry.note.length, 0);
+    return {
+      inputTokens,
+      contextLimit: input.contextLimit,
+      requiresChunking: inputTokens >= Math.floor(input.contextLimit * 0.75)
+    };
+  }
+
+  override async generateStructured(input: GenerationRequest): Promise<ReportDraft> {
+    this.calls.push(input);
+    return {
+      schemaVersion: 1,
+      metadata: {
+        title: 'Daily Status Report', dateFrom: input.dateFrom, dateTo: input.dateTo,
+        generatedAt: '2026-08-31T18:00:00.000Z'
+      },
+      sections: [{ id: 'done', title: 'Completed', kind: 'bullets', items: ['compressed summary'] }],
       warnings: []
     };
   }
@@ -142,6 +171,46 @@ describe('ReportEngine', () => {
     database.close();
   });
 
+  it('maps deterministic sections from their configured source fields without duplicating notes', async () => {
+    const provider = new CountingProvider();
+    const { database, reports } = await engine(provider);
+    const input = request();
+    input.blueprint.sections = [
+      { id: 'done', title: 'Completed', kind: 'bullets', sourceFields: ['note'], required: true },
+      { id: 'blockers', title: 'Blockers', kind: 'bullets', sourceFields: ['blockers'], required: false }
+    ];
+    input.entries[1]!.standardValues.blockers = 'Waiting for security review';
+
+    const result = await reports.generate(input, { exportFormat: 'markdown' });
+
+    expect(result.draft.sections[1]?.items).toEqual(['Waiting for security review']);
+    database.close();
+  });
+
+  it('applies blueprint field mappings and transforms while preserving metadata section kinds', async () => {
+    const provider = new CountingProvider();
+    const { database, reports } = await engine(provider);
+    const input = request();
+    input.entries[0]!.standardValues.duration = '1h 30m';
+    input.entries[0]!.tags = ['security', 'release'];
+    input.blueprint.sections = [
+      { id: 'facts', title: 'Facts', kind: 'metadata', sourceFields: ['Day', 'Hours', 'Labels'], required: true }
+    ];
+    input.blueprint.fieldMappings = [
+      { source: 'workDate', target: 'Day', transform: 'date' },
+      { source: 'duration', target: 'Hours', transform: 'duration' },
+      { source: 'tags', target: 'Labels', transform: 'join' }
+    ];
+
+    const result = await reports.generate(input, { exportFormat: 'json' });
+
+    expect(result.draft.sections[0]).toMatchObject({
+      kind: 'metadata',
+      items: ['2026-08-30', '1.5', 'security, release', '2026-08-31']
+    });
+    database.close();
+  });
+
   it('returns the cached AI draft for an unchanged request', async () => {
     const provider = new CountingProvider();
     const { database, reports } = await engine(provider);
@@ -153,6 +222,10 @@ describe('ReportEngine', () => {
     expect(first.cacheHit).toBe(false);
     expect(second.cacheHit).toBe(true);
     expect(provider.calls).toHaveLength(1);
+    expect(database.prepare('SELECT provider_input_tokens, output_tokens FROM generation_jobs WHERE id = ?').get(first.id)).toEqual({
+      provider_input_tokens: 88,
+      output_tokens: 22
+    });
     database.close();
   });
 
@@ -171,6 +244,24 @@ describe('ReportEngine', () => {
 
     expect(provider.calls).toHaveLength(5);
     expect(provider.calls.filter((call) => call.dateFrom === '2026-08-31')).toHaveLength(1);
+    database.close();
+  });
+
+  it('splits an oversized single day without raising the configured context limit or losing input text', async () => {
+    const provider = new LengthProvider();
+    const { database, reports } = await engine(provider);
+    const input = request({ narrative: true, contextLimit: 2_000 });
+    const original = 'x'.repeat(5_000);
+    input.entries = [{ ...input.entries[0]!, note: original }];
+    input.dateTo = input.dateFrom;
+
+    const result = await reports.generate(input, { providerProfileId: 'provider-1', exportFormat: 'docx' });
+
+    const sourceChunks = provider.calls.flatMap((call) => call.entries)
+      .filter((entry) => entry.id.startsWith('day-1-part'));
+    expect(sourceChunks.map((entry) => entry.note).join('')).toBe(original);
+    expect(provider.calls.every((call) => call.contextLimit === 2_000)).toBe(true);
+    expect(result.chunked).toBe(true);
     database.close();
   });
 });

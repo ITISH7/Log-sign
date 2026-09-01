@@ -12,6 +12,7 @@ export interface AppServerProcess {
   stdin: Writable;
   stderr: Readable;
   kill(): boolean;
+  once?(event: 'exit' | 'close', listener: (code?: number | null) => void): unknown;
 }
 
 export type SpawnAppServer = (cwd: string) => Promise<AppServerProcess>;
@@ -52,7 +53,7 @@ export class CodexAppServerTransport implements TextProviderTransport {
         model: this.model,
         cwd: workspace,
         ephemeral: true
-      });
+      }, signal);
       let finalText = '';
       let turnId = '';
       let resolveTurn!: () => void;
@@ -70,6 +71,7 @@ export class CodexAppServerTransport implements TextProviderTransport {
           } else resolveTurn();
         }
       });
+      const stopFailure = client.onFailure(rejectTurn);
       const onAbort = () => {
         if (turnId) void client.request('turn/interrupt', { threadId: thread.thread.id, turnId }).catch(() => undefined);
         rejectTurn(new DOMException('Generation cancelled', 'AbortError'));
@@ -86,7 +88,7 @@ export class CodexAppServerTransport implements TextProviderTransport {
             type: 'readOnly',
             access: { type: 'restricted', includePlatformDefaults: true, readableRoots: [workspace] }
           }
-        });
+        }, signal);
         turnId = response.turn.id;
         await completed;
         if (!finalText) throw new Error('Codex App Server returned no final report message');
@@ -94,6 +96,7 @@ export class CodexAppServerTransport implements TextProviderTransport {
       } finally {
         signal.removeEventListener('abort', onAbort);
         stopListening();
+        stopFailure();
       }
     });
   }
@@ -109,17 +112,19 @@ export class CodexAppServerTransport implements TextProviderTransport {
         if (success) resolveLogin();
         else rejectLogin(new Error(String(message.params?.error ?? 'Codex sign-in failed')));
       });
+      const stopFailure = client.onFailure(rejectLogin);
       const onAbort = () => rejectLogin(new DOMException('Codex sign-in cancelled', 'AbortError'));
       signal.addEventListener('abort', onAbort, { once: true });
       try {
         const result = await client.request<{ authUrl: string }>('account/login/start', {
           type: 'chatgpt', useHostedLoginSuccessPage: true, appBrand: 'chatgpt'
-        });
+        }, signal);
         await openUrl(result.authUrl);
         await completed;
       } finally {
         signal.removeEventListener('abort', onAbort);
         stopListening();
+        stopFailure();
       }
     });
   }
@@ -144,21 +149,34 @@ export class CodexAppServerTransport implements TextProviderTransport {
 
 class RpcClient {
   private nextId = 1;
-  private readonly pending = new Map<number, { resolve(value: unknown): void; reject(reason: Error): void }>();
+  private readonly pending = new Map<number, { resolve(value: unknown): void; reject(reason: Error): void; cleanup(): void }>();
   private readonly listeners = new Set<(message: RpcMessage) => void>();
+  private readonly failureListeners = new Set<(error: Error) => void>();
   private stderr = '';
 
   constructor(private readonly process: AppServerProcess) {
     process.stderr.setEncoding('utf8').on('data', (chunk) => { this.stderr = `${this.stderr}${String(chunk)}`.slice(-2_000); });
     const lines = createInterface({ input: process.stdout });
     lines.on('line', (line) => this.receive(line));
+    lines.once('close', () => this.rejectAll(new Error('Codex App Server closed its output')));
     process.stdout.once('error', (error) => this.rejectAll(error));
+    process.once?.('exit', (code) => this.rejectAll(new Error(`Codex App Server exited${code == null ? '' : ` with code ${code}`}`)));
   }
 
-  request<T = unknown>(method: string, params: Record<string, unknown>): Promise<T> {
+  request<T = unknown>(method: string, params: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
+    if (signal?.aborted) return Promise.reject(new DOMException('Generation cancelled', 'AbortError'));
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve: (value) => resolve(value as T), reject });
+      const onAbort = () => {
+        this.pending.delete(id);
+        reject(new DOMException('Generation cancelled', 'AbortError'));
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      this.pending.set(id, {
+        resolve: (value) => resolve(value as T),
+        reject,
+        cleanup: () => signal?.removeEventListener('abort', onAbort)
+      });
       this.process.stdin.write(`${JSON.stringify({ method, id, params })}\n`);
     });
   }
@@ -172,6 +190,11 @@ class RpcClient {
     return () => this.listeners.delete(listener);
   }
 
+  onFailure(listener: (error: Error) => void): () => void {
+    this.failureListeners.add(listener);
+    return () => this.failureListeners.delete(listener);
+  }
+
   private receive(line: string): void {
     let message: RpcMessage;
     try { message = JSON.parse(line) as RpcMessage; } catch { return; }
@@ -179,6 +202,7 @@ class RpcClient {
       const pending = this.pending.get(message.id);
       if (!pending) return;
       this.pending.delete(message.id);
+      pending.cleanup();
       if (message.error) pending.reject(new Error(message.error.message ?? 'Codex App Server request failed'));
       else pending.resolve(message.result);
       return;
@@ -192,8 +216,13 @@ class RpcClient {
 
   private rejectAll(error: Error): void {
     const detail = this.stderr.trim();
-    for (const pending of this.pending.values()) pending.reject(new Error(detail || error.message));
+    const failure = new Error(detail || error.message);
+    for (const pending of this.pending.values()) {
+      pending.cleanup();
+      pending.reject(failure);
+    }
     this.pending.clear();
+    for (const listener of this.failureListeners) listener(failure);
   }
 }
 

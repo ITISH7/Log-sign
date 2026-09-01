@@ -13,6 +13,7 @@ interface BackupHeader {
   nonce: string;
   createdAt: string;
   argon: { t: number; m: number; p: number; dkLen: 32 };
+  includesDatabaseKey: boolean;
 }
 
 interface BackupOptions {
@@ -22,6 +23,7 @@ interface BackupOptions {
 }
 
 export type DatabaseSnapshot = (targetPath: string) => Promise<unknown>;
+export interface PortableRestoreMaterial { databaseKey?: Buffer }
 
 export class BackupService {
   private readonly argon: BackupHeader['argon'];
@@ -35,8 +37,9 @@ export class BackupService {
     };
   }
 
-  async exportPortable(sourcePath: string, targetPath: string, password: string): Promise<void> {
+  async exportPortable(sourcePath: string, targetPath: string, password: string, databaseKey?: Buffer): Promise<void> {
     assertStrongPassword(password);
+    if (databaseKey && databaseKey.byteLength !== 32) throw new Error('The portable database key must be 32 bytes');
     const plaintext = await readFile(sourcePath);
     const salt = randomBytes(16);
     const nonce = randomBytes(12);
@@ -45,28 +48,38 @@ export class BackupService {
       salt: salt.toString('base64'),
       nonce: nonce.toString('base64'),
       createdAt: new Date().toISOString(),
-      argon: this.argon
+      argon: this.argon,
+      includesDatabaseKey: Boolean(databaseKey)
     };
     const headerBytes = Buffer.from(JSON.stringify(header), 'utf8');
     const length = Buffer.alloc(4);
     length.writeUInt32BE(headerBytes.byteLength);
     const authenticatedHeader = Buffer.concat([MAGIC, length, headerBytes]);
     const key = await deriveKey(password, salt, header.argon);
-    const ciphertext = Buffer.from(gcm(key, nonce, authenticatedHeader).encrypt(plaintext));
+    const payload = databaseKey
+      ? Buffer.concat([Buffer.from([1]), databaseKey, plaintext])
+      : Buffer.concat([Buffer.from([0]), plaintext]);
+    const ciphertext = Buffer.from(gcm(key, nonce, authenticatedHeader).encrypt(payload));
 
     await atomicWrite(targetPath, Buffer.concat([authenticatedHeader, ciphertext]));
   }
 
-  async restorePortable(sourcePath: string, targetPath: string, password: string): Promise<void> {
+  async restorePortable(sourcePath: string, targetPath: string, password: string): Promise<PortableRestoreMaterial> {
     assertStrongPassword(password);
     const artifact = await readFile(sourcePath);
     try {
       const { header, authenticatedHeader, ciphertext } = parseArtifact(artifact);
       const key = await deriveKey(password, Buffer.from(header.salt, 'base64'), header.argon);
-      const plaintext = Buffer.from(
+      const payload = Buffer.from(
         gcm(key, Buffer.from(header.nonce, 'base64'), authenticatedHeader).decrypt(ciphertext)
       );
+      const hasKey = payload[0] === 1;
+      if (hasKey !== header.includesDatabaseKey) throw new Error('Backup key metadata does not match its payload');
+      const databaseKey = hasKey ? payload.subarray(1, 33) : undefined;
+      const plaintext = payload.subarray(hasKey ? 33 : 1);
+      if (plaintext.byteLength === 0) throw new Error('Backup database is empty');
       await atomicWrite(targetPath, plaintext);
+      return { databaseKey: databaseKey ? Buffer.from(databaseKey) : undefined };
     } catch (error) {
       throw new Error('Unable to decrypt backup. Check the password and backup file.', { cause: error });
     }
@@ -122,6 +135,27 @@ export function selectBackupsToKeep(names: string[], dailyRetention = 7, weeklyR
   return [...daily, ...weekly];
 }
 
+export async function replaceDatabaseFile(
+  livePath: string,
+  restoredPath: string,
+  safetyPath: string
+): Promise<void> {
+  await rename(livePath, safetyPath);
+  try {
+    await rename(restoredPath, livePath);
+  } catch (replacementError) {
+    try {
+      await rename(safetyPath, livePath);
+    } catch (rollbackError) {
+      throw new AggregateError(
+        [replacementError, rollbackError],
+        `Database replacement failed and the original remains at ${safetyPath}`
+      );
+    }
+    throw replacementError;
+  }
+}
+
 async function deriveKey(password: string, salt: Uint8Array, argon: BackupHeader['argon']): Promise<Uint8Array> {
   return argon2idAsync(password, salt, {
     ...argon,
@@ -140,9 +174,20 @@ function parseArtifact(artifact: Buffer): {
   }
   const headerLength = artifact.readUInt32BE(MAGIC.byteLength);
   const bodyOffset = MAGIC.byteLength + 4 + headerLength;
-  if (headerLength < 1 || bodyOffset >= artifact.byteLength) throw new Error('Invalid backup header');
+  if (headerLength < 1 || headerLength > 4_096 || bodyOffset >= artifact.byteLength) throw new Error('Invalid backup header');
   const header = JSON.parse(artifact.subarray(MAGIC.byteLength + 4, bodyOffset).toString('utf8')) as BackupHeader;
-  if (header.schemaVersion !== 1 || !header.salt || !header.nonce || header.argon?.dkLen !== 32) {
+  const salt = Buffer.from(header.salt ?? '', 'base64');
+  const nonce = Buffer.from(header.nonce ?? '', 'base64');
+  const argon = header.argon;
+  if (
+    header.schemaVersion !== 1 ||
+    salt.byteLength !== 16 ||
+    nonce.byteLength !== 12 ||
+    argon?.dkLen !== 32 ||
+    !Number.isInteger(argon.t) || argon.t < 1 || argon.t > 10 ||
+    !Number.isInteger(argon.m) || argon.m < 8 || argon.m > 262_144 ||
+    !Number.isInteger(argon.p) || argon.p < 1 || argon.p > 4
+  ) {
     throw new Error('Invalid backup metadata');
   }
   return {

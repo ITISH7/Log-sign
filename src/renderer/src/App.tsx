@@ -18,6 +18,7 @@ const navItems: Array<{ id: Page; label: string; icon: string }> = [
 export function App() {
   const [page, setPage] = useState<Page>('today');
   const [locked, setLocked] = useState<boolean>();
+  const [recoveryError, setRecoveryError] = useState('');
   const [entries, setEntries] = useState<Entry[]>([]);
   const [templates, setTemplates] = useState<TemplateSummary[]>([]);
   const [providers, setProviders] = useState<ProviderProfileView[]>([]);
@@ -38,12 +39,25 @@ export function App() {
 
   useEffect(() => {
     void window.dsr.security.status().then((status) => {
+      setRecoveryError(status.recoveryError ?? '');
       setLocked(status.locked);
       if (!status.locked) void refresh(); else setLoading(false);
     }).catch((reason) => { setError(readableError(reason)); setLocked(true); setLoading(false); });
   }, [refresh]);
 
+  useEffect(() => window.dsr.navigation.onOpen((target) => setPage(target)), []);
+
+  useEffect(() => {
+    const handleRejection = (event: PromiseRejectionEvent) => {
+      event.preventDefault();
+      setError(readableError(event.reason));
+    };
+    window.addEventListener('unhandledrejection', handleRejection);
+    return () => window.removeEventListener('unhandledrejection', handleRejection);
+  }, []);
+
   if (locked === undefined) return <LoadingScreen />;
+  if (recoveryError) return <RecoveryScreen message={recoveryError} />;
   if (locked) return <UnlockScreen onUnlock={async (passphrase) => { await window.dsr.security.unlock(passphrase); setLocked(false); await refresh(); }} />;
 
   return <div className="app-shell"><aside className="sidebar">
@@ -55,12 +69,22 @@ export function App() {
     {page === 'history' && <HistoryPage entries={entries} onChanged={refresh} />}
     {page === 'templates' && <TemplatesPage templates={templates} providers={providers} onChanged={refresh} />}
     {page === 'generate' && <GeneratePage templates={templates} providers={providers} />}
-    {page === 'settings' && <><SettingsPage providers={providers} customFields={customFields} onChanged={refresh} /><ProviderQuickActions providers={providers} onChanged={refresh} /></>}
+    {page === 'settings' && <><SettingsPage providers={providers} customFields={customFields} onChanged={refresh} /><BackupHealth /><ProviderQuickActions providers={providers} onChanged={refresh} /><CustomFieldTools onChanged={refresh} /></>}
     {error && <div role="alert" className="error-banner">{error}</div>}
   </main></div>;
 }
 
 function LoadingScreen() { return <main className="lock-screen"><div className="lock-card"><span className="brand-mark">D</span><h1>Opening your workspace…</h1></div></main>; }
+
+function RecoveryScreen({ message }: { message: string }) {
+  return <main className="lock-screen"><div className="lock-card"><span className="brand-mark">D</span><p className="eyebrow">Workspace recovery required</p><h1>The encrypted database could not be opened</h1><p role="alert">{message}</p><p>Keep the database and its .pre-restore safety copies. Restore the newest encrypted backup after correcting the OS keyring or database file problem.</p></div></main>;
+}
+
+function BackupHealth() {
+  const [health, setHealth] = useState<{ lastSuccess?: string; lastError?: string }>({});
+  useEffect(() => { void window.dsr.backup.status().then(setHealth); }, []);
+  return <div className="panel"><h2>Automatic backup health</h2><p className="helper">{health.lastError ? `Last error: ${health.lastError}` : health.lastSuccess ? `Last successful snapshot: ${new Date(health.lastSuccess).toLocaleString()}` : 'A snapshot will be created while the workspace is open.'}</p></div>;
+}
 
 function UnlockScreen({ onUnlock }: { onUnlock(passphrase: string): Promise<void> }) {
   const [passphrase, setPassphrase] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
@@ -131,6 +155,13 @@ function ProviderQuickActions({ providers, onChanged }: { providers: ProviderPro
   const [message, setMessage] = useState('');
   if (providers.length === 0) return null;
   return <div className="panel provider-actions"><h2>Profile maintenance</h2>{providers.map((provider) => <article className="list-card" key={provider.id}><div><strong>{provider.name}</strong><small>Rename, replace credentials, or change the default without affecting saved reports.</small></div><div className="row-actions">{provider.kind === 'codex-subscription' && <button onClick={async () => { try { const result = await window.dsr.providers.login(provider.id); setMessage(result.message); } catch (reason) { setMessage(readableError(reason)); } }}>Connect with ChatGPT</button>}{!provider.isDefault && <button onClick={async () => { await window.dsr.providers.save({ id: provider.id, makeDefault: true }); await onChanged(); }}>Make default</button>}<button onClick={async () => { const name = window.prompt('Rename AI profile', provider.name); if (name?.trim()) { await window.dsr.providers.save({ id: provider.id, name: name.trim() }); await onChanged(); } }}>Rename</button>{provider.kind.endsWith('-api') && <button onClick={async () => { const credential = window.prompt('Enter the replacement API key'); if (credential?.trim()) { await window.dsr.providers.save({ id: provider.id, credential }); setMessage('Credential replaced securely.'); } }}>Replace key</button>}</div></article>)}{message && <p className="helper">{message}</p>}</div>;
+}
+
+function CustomFieldTools({ onChanged }: { onChanged(): Promise<void> }) {
+  const [label, setLabel] = useState('');
+  const [type, setType] = useState<CustomField['type']>('text');
+  const [options, setOptions] = useState('');
+  return <div className="panel provider-actions"><h2>Advanced custom field</h2><div className="settings-grid"><label className="field"><span>Label</span><input value={label} onChange={(event) => setLabel(event.target.value)} placeholder="Customer impact" /></label><label className="field"><span>Field type</span><select value={type} onChange={(event) => setType(event.target.value as CustomField['type'])}><option value="text">Text</option><option value="number">Number</option><option value="boolean">Yes / no</option><option value="date">Date</option><option value="select">Choice list</option></select></label>{type === 'select' && <label className="field"><span>Choices</span><input value={options} onChange={(event) => setOptions(event.target.value)} placeholder="Low, Medium, High" /></label>}<button className="primary" disabled={!label.trim()} onClick={async () => { await window.dsr.entries.createCustomField({ label: label.trim(), type, options: options.split(',').map((item) => item.trim()).filter(Boolean) }); setLabel(''); setOptions(''); await onChanged(); }}>Add typed field</button></div></div>;
 }
 
 function updateSection(draft: ReportDraft, index: number, patch: Partial<ReportDraft['sections'][number]>): ReportDraft { return { ...draft, sections: draft.sections.map((section, current) => current === index ? { ...section, ...patch } : section) }; }

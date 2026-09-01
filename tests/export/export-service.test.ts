@@ -84,6 +84,20 @@ describe('ExportService', () => {
     expect(JSON.parse(await readFile(target, 'utf8'))).toEqual(draft);
   });
 
+  it('escapes Markdown table cells and neutralizes spreadsheet formulas in CSV', async () => {
+    const { directory, exports } = await service();
+    const unsafe = structuredClone(draft);
+    unsafe.sections[2]!.rows = [{ Task: 'A | B\nnext', Status: '=HYPERLINK("bad")' }];
+    const markdownPath = join(directory, 'safe.md');
+    const csvPath = join(directory, 'safe.csv');
+
+    await exports.export('markdown', { draft: unsafe, blueprint, targetPath: markdownPath });
+    await exports.export('csv', { draft: unsafe, blueprint, targetPath: csvPath });
+
+    expect(await readFile(markdownPath, 'utf8')).toContain('A \\| B<br>next');
+    expect(await readFile(csvPath, 'utf8')).toContain("'=HYPERLINK");
+  });
+
   it('writes a readable XLSX workbook with mapped headings', async () => {
     const { directory, exports } = await service();
     const target = join(directory, 'report.xlsx');

@@ -86,10 +86,25 @@ function runProcess(
     });
     let stdout = '';
     let stderr = '';
-    child.stdout.setEncoding('utf8').on('data', (chunk) => (stdout += chunk));
-    child.stderr.setEncoding('utf8').on('data', (chunk) => (stderr += chunk));
+    const maximumOutput = 8 * 1024 * 1024;
+    let settled = false;
+    const append = (current: string, chunk: unknown) => {
+      const next = current + String(chunk);
+      if (Buffer.byteLength(next) > maximumOutput) {
+        child.kill();
+        if (!settled) {
+          settled = true;
+          reject(new Error(`${command} exceeded the ${maximumOutput / 1024 / 1024} MB output limit`));
+        }
+      }
+      return next.slice(-maximumOutput);
+    };
+    child.stdout.setEncoding('utf8').on('data', (chunk) => (stdout = append(stdout, chunk)));
+    child.stderr.setEncoding('utf8').on('data', (chunk) => (stderr = append(stderr, chunk)));
     child.once('error', reject);
     child.once('close', (code) => {
+      if (settled) return;
+      settled = true;
       if (code === 0) resolve({ stdout, stderr });
       else reject(new Error(`${command} exited with code ${code}: ${stderr.trim()}`));
     });
