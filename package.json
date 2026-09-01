@@ -1,0 +1,84 @@
+{
+  "name": "dsr-creator",
+  "version": "0.1.0",
+  "description": "Local-first Daily Status Report creator for Windows and Linux",
+  "main": "out/main/index.js",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "verify": "npm run typecheck && npm test && npm run build",
+    "dist:linux": "npm run build && electron-builder --linux AppImage deb --x64",
+    "dist:windows": "npm run build && electron-builder --win nsis --x64",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "latest",
+    "@noble/ciphers": "latest",
+    "@noble/hashes": "latest",
+    "@openai/codex-sdk": "latest",
+    "@radix-ui/react-dialog": "latest",
+    "@radix-ui/react-tabs": "latest",
+    "better-sqlite3-multiple-ciphers": "latest",
+    "docx": "latest",
+    "exceljs": "latest",
+    "fast-xml-parser": "latest",
+    "mammoth": "latest",
+    "openai": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "react-hook-form": "latest",
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "latest",
+    "@testing-library/react": "latest",
+    "@testing-library/user-event": "latest",
+    "@types/better-sqlite3": "latest",
+    "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "@vitejs/plugin-react": "^5.1.1",
+    "electron": "42.10.1",
+    "electron-builder": "latest",
+    "electron-vite": "latest",
+    "jsdom": "^29.0.1",
+    "typescript": "latest",
+    "vite": "^7.3.6",
+    "vitest": "latest"
+  },
+  "build": {
+    "appId": "com.dsrcreator.desktop",
+    "productName": "DSR Creator",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/better-sqlite3-multiple-ciphers/**/*"
+    ],
+    "win": {
+      "target": ["nsis"],
+      "artifactName": "DSR-Creator-${version}-Windows-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "linux": {
+      "target": ["AppImage", "deb"],
+      "category": "Office",
+      "artifactName": "DSR-Creator-${version}-Linux-${arch}.${ext}"
+    }
+  }
+}
